@@ -1,0 +1,131 @@
+#!/bin/sh
+
+PATH=${PATH}:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+: ${MNTPREFIX="/media"}
+: ${MNTOPTS="-o ro"}
+: ${POSTCMD="echo OK"}
+
+
+self=$0
+action=$1
+cdev=$2
+
+test -n "$3" && POSTCMD=$3
+
+__log() {
+    logger -t amount "$@"
+}
+
+__fstype() {
+    local _dev=$1
+    local _type=`fstyp "/dev/${_dev}" 2>/dev/null`
+
+    if [ -z "${_type}" ]
+    then
+        if dd < /dev/${_dev} count=1 2> /dev/null | strings | \
+            head -1 | grep -q 'EXFAT' 
+        then
+            _type='exfat'
+        fi
+    fi
+
+    echo ${_type}
+}
+
+__check_already_mounted() {
+    local _dev=$1
+    local _mnt=$2
+
+    local _mp=`mount | sed 's/ (.*//' | grep "^/dev/${_dev} on " | \
+        cut -d ' ' -f 3-255`
+    if [ -n "${_mp}" ]
+    then
+        __log "${_dev}: already mounted on '${_mp}' mount point"
+        exit 0
+    fi
+
+    local _mdev=`mount | sed 's/ (.*//' | grep "on ${_mp}$" | \
+        cut -d ' ' -f 1`
+    if [ -n "${_mdev}" ]
+    then
+        __log "${_mdev}: already mounted on '${_mnt}' mount point"
+        exit 0
+    fi
+}
+
+__mount() {
+    local _type=$1
+    local _dev=$2
+    local _mnt=$3
+
+    for d in ${_dev} $(glabel status -s | \
+        awk -v dev=${_dev} '{ if ($3 == dev) print $1}')
+    do
+        __check_already_mounted "${d}" "${_mnt}"
+    done
+
+    mkdir "${_mnt}"
+    case "${_type}" in
+        (EXFAT)
+            if mount.exfat ${MNTOPTS} /dev/${_dev} ${_mnt} # sysutils/fusefs-exfat
+            then
+                __log "${_dev} successfully mounted on ${_mnt}"
+            else
+                __log "${_dev}: mount failed (exfat) " \
+                    "'mount.exfat ${OPTS} /dev/${_dev} ${_mnt}'"
+                rmdir "${_mnt}"
+                exit 1
+            fi
+            ;;
+        (*)
+            if mount -t ${_type} ${MNTOPTS} /dev/${_dev} ${_mnt}
+            then
+                __log "${_dev} successfully mounted on ${_mnt}"
+            else
+                __log "${_dev}: mount failed (${_type}) " \
+                    "'mount -t ${_type} ${OPTS} /dev/${_dev} ${_mnt}'"
+                rmdir "${_mnt}"
+                exit 1
+            fi
+            ;;
+    esac 
+}
+
+
+__umount() {
+    local _dev=$1
+    local _mnt=$2
+
+    if umount -f ${_mnt}
+    then
+        __log "${_dev}: ${_mnt} umounted successfully"
+        rmdir "${_mnt}"
+    else
+        __log "${_dev}: umount failed"
+        exit 1
+    fi
+}
+
+
+
+_mp="`dirname ${MNTPREFIX}/file`/${cdev}"
+case ${action} in
+    (attach)
+        lockf -ks -t 10 ${self} ${self} mount ${cdev} && ${POSTCMD} 
+        ;;
+
+    (mount)
+        fstype=$(__fstype ${cdev})
+        if [ -z "${fstype}" ]
+        then
+            exit 1
+        fi
+
+        __mount ${fstype} ${cdev} ${_mp}
+        ;;
+
+    (detach)
+        __umount ${cdev} ${_mp} && ${POSTCMD}
+        ;;
+esac
